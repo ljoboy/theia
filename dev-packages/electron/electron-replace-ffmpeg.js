@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-check
 /********************************************************************************
  * Copyright (C) 2019 Ericsson and others.
  *
@@ -15,21 +14,59 @@
  *
  * SPDX-License-Identifier: EPL-2.0 OR GPL-2.0 WITH Classpath-exception-2.0
  ********************************************************************************/
+'use-strict'
+
+// @ts-check
 
 const downloadElectron = require('electron-download');
 const unzipper = require('unzipper');
+const yargs = require('yargs');
+const path = require('path');
 const fs = require('fs');
 
+const { platforms, libffmpegLocation } = require('./electron-ffmpeg-lib')
+
 async function main() {
-    const electronVersionFilePath = require.resolve('electron/dist/version');
-    const electronVersion = fs.readFileSync(electronVersionFilePath, {
-        encoding: 'utf8'
-    }).trim();
+    const options = yargs
+        .option('electronVersion', {
+            alias: ['v'],
+            description: 'Electron version for which to pull the "clean" ffmpeg library.',
+        })
+        .option('absolutePath', {
+            alias: ['a'],
+            description: 'Absolute path to the ffmpeg shared library.',
+        })
+        .option('electronDist', {
+            alias: ['d'],
+            description: 'Electron distribution location.',
+        })
+        .option('platform', {
+            alias: ['p'],
+            description: 'Dictates where the library is located within the Electron distribution.',
+            choices: platforms,
+        })
+        .help().alias('h', 'help')
+        .exitProcess(false)
+        .argv;
+
+    if (options.help) {
+        return; // help is being displayed.
+    }
+
+    const electronDist = options['electronDist'] || path.resolve(require.resolve('electron/index.js'), '..', 'dist');
+
+    let electronVersion = options['electronVersion'];
+    if (!electronVersion) {
+        const electronVersionFilePath = path.resolve(electronDist, 'version');
+        electronVersion = fs.readFileSync(electronVersionFilePath, {
+            encoding: 'utf8'
+        }).trim();
+    }
 
     const libffmpegZipPath = await new Promise((resolve, reject) => {
         downloadElectron({
             // `version` usually starts with a `v`, which already gets added by `electron-download`.
-            version: electronVersion.slice(1),
+            version: electronVersion.replace(/^v/i, ''),
             ffmpeg: true,
         }, (error, path) => {
             if (error) reject(error);
@@ -37,17 +74,20 @@ async function main() {
         });
     });
 
+    console.info(`Downloaded ffmpeg shared library { version: "${electronVersion}", dist: "${electronDist}" }.`);
+
     const {
         name: libffmpegFileName,
         folder: libffmpegFolder = '',
-    } = libffmpegFile();
+    } = libffmpegLocation(options['platform']);
 
     const libffmpegZip = await unzipper.Open.file(libffmpegZipPath);
     const file = libffmpegZip.files.find(file => file.path.endsWith(libffmpegFileName));
     if (!file) {
-        throw new Error(`archive did not contain "${libffmpegFileName}"`);
+        throw new Error(`archive did not contain "${libffmpegFileName}".`);
     }
-    const electronFfmpegLibPath = require.resolve(`electron/dist/${libffmpegFolder}${libffmpegFileName}`);
+    const electronFfmpegLibPath = options['absolutePath'] ||
+        path.resolve(electronDist, libffmpegFolder, libffmpegFileName);
 
     await new Promise((resolve, reject) => {
         file.stream()
@@ -55,35 +95,8 @@ async function main() {
             .on('finish', resolve)
             .on('error', reject);
     });
-}
 
-/**
- * @typedef {Object} File
- * @property {String} name
- * @property {String} [folder]
- */
-
-/**
- * @return {File}
- */
-function libffmpegFile() {
-    switch (process.platform) {
-        case 'darwin':
-            return {
-                name: 'libffmpeg.dylib',
-                folder: 'Electron.app/Contents/Frameworks/Electron Framework.framework/Libraries/',
-            };
-        case 'linux':
-            return {
-                name: 'libffmpeg.so',
-            };
-        case 'win32':
-            return {
-                name: 'ffmpeg.dll',
-            };
-        default:
-            throw new Error(`${process.platform} is not supported`);
-    }
+    console.info(`Successfully replaced "${electronFfmpegLibPath}".`);
 }
 
 main().catch(error => {
